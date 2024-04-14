@@ -1,8 +1,8 @@
 import pynetbox, logging
 from extras.default_configs import *
 
-NETBOX_URL = "https://3.144.220.159"
-NETBOX_TOKEN = "b186b056aae496bb4b2f1b8240964dad6f941265"
+NETBOX_URL: str = "https://netbox.iribarrem.com"
+NETBOX_TOKEN: str = "b186b056aae496bb4b2f1b8240964dad6f941265"
 
 def configure_bgp(host, netbox) -> str:
     config: str = ""
@@ -11,10 +11,13 @@ def configure_bgp(host, netbox) -> str:
     config += configure_prefix_lists(host, bgp)
     config += configure_communities(host, bgp)
     config += configure_route_policies(host, bgp)
+    config += f'bgp {host.custom_fields["ASN"]}'
+    config += configure_bgp_groups(host, bgp)
+    
     return config
 
 def configure_prefix_lists(host, bgp) -> str:
-    config: str = ""
+    output: str = ""
 
     ## Get Prefix Lists used in the device
     prefix_lists = []
@@ -34,16 +37,16 @@ def configure_prefix_lists(host, bgp) -> str:
             elif rule.prefix_custom:
                 prefix = rule.prefix_custom.split("/")
 
-            config += f"ip ip-prefix { prefix_list.name } index { rule.index } { rule.action } { prefix[0] } { prefix[1] }"
+            output += f"ip ip-prefix { prefix_list.name } index { rule.index } { rule.action } { prefix[0] } { prefix[1] }"
 
             if rule.ge:
-                config += " greater-equal " + str(rule.ge)
+                output += " greater-equal " + str(rule.ge)
             if rule.le:
-                config += " less-equal " + str(rule.le)
+                output += " less-equal " + str(rule.le)
 
-            config += "\n"
+            output += "\n"
 
-    return config + "\n"
+    return output + "\n"
 
 def configure_route_policies(host, bgp) -> str:
     output: str = ""
@@ -120,6 +123,19 @@ def configure_communities(host, bgp) -> str:
     output += "\n"
     return output
 
+def configure_bgp_groups(host, bgp) -> str:
+    output: str = ""
+    peer_groups = [bgp_session.peer_group for bgp_session in bgp.session.filter(device=host.name) if bgp_session.peer_group is not None]
+
+    for group in peer_groups:
+        peer_group = bgp.peer_group.get(id=group.id)
+        print(peer_group)
+
+        if peer_group.custom_fields["bgp_session_type"] == "External":
+            output += f"    peer {peer_group.name} external\n"
+            output += f"    peer {peer_group.name} as-number {peer_group.custom_fields['ASN']}"
+    return output
+
 def main():
     logger = logging.getLogger("logger")
     handler = logging.StreamHandler()
@@ -132,10 +148,9 @@ def main():
         url=NETBOX_URL,
         token=NETBOX_TOKEN
     )
-    netbox.http_session.verify = False
 
     for host in netbox.dcim.devices.all():
-        output_config = ""
+        output_config: str = ""
 
         if host.primary_ip and host.platform:
             if host.platform.name == "Huawei VRP":
