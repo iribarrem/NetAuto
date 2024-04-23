@@ -1,167 +1,40 @@
 import pynetbox, logging
-from extras.default_configs import *
+from pynetbox.core.response import RecordSet, Record
+from pynetbox.core.app import App
 
 NETBOX_URL: str = "https://netbox.iribarrem.com"
 NETBOX_TOKEN: str = "b186b056aae496bb4b2f1b8240964dad6f941265"
 
-def configure_bgp(host, netbox) -> str:
-    config: str = ""
-    bgp = netbox.plugins.bgp
+class Netbox():
+    def __init__(self, url, token) -> None:
+        self.netbox = pynetbox.api(
+            url=url,
+            token=token,
+            threading=True
+        )
 
-    config += configure_prefix_lists(host, bgp)
-    config += configure_communities(host, bgp)
-    config += configure_route_policies(host, bgp)
-    config += f'bgp {host.custom_fields["ASN"]}'
-    config += configure_bgp_groups(host, bgp)
+        self.devices: RecordSet = self.netbox.dcim.devices.all()
+        
+        self.bgp: App = self.netbox.plugins.bgp
+        self.bgp_sessions: list[Record] = list(self.bgp.session.all())
+        self.rp_rules: list[Record] = list(self.bgp.routing_policy_rule.all())
+        self.community_list_rules: list[Record] = list(self.bgp.community_list_rule.all())
+        self.prefix_list_rules: list[Record] = list(self.bgp.prefix_list_rule.all())
     
-    return config
+def main() -> None:
+    netbox = Netbox(NETBOX_URL, NETBOX_TOKEN)
 
-def configure_prefix_lists(host, bgp) -> str:
-    output: str = ""
+    for device in netbox.devices:
+        device_bgp_sessions: list[Record] = [bgp_session for bgp_session in netbox.bgp_sessions if bgp_session.device["id"] == device.id]
 
-    ## Get Prefix Lists used in the device
-    prefix_lists = []
-    for bgp_session in bgp.session.filter(device=host.name):
-        routing_policies = bgp_session.import_policies + bgp_session.export_policies
-        for routing_policy in routing_policies:
-            rules = bgp.routing_policy_rule.filter(routing_policy_id=routing_policy.id)
-            for rule in rules:
-                for prefix_list in rule.match_ip_address:
-                    prefix_lists.append(prefix_list)
+        device_rp_rules: list[Record] = []
+        for session in device_bgp_sessions:
+            routing_policies: list[int] = [rp["id"] for rp in session.import_policies]
+            routing_policies.extend([rp["id"] for rp in session.export_policies])
 
-    ## Configure Prefix Lists without Duplicates
-    for prefix_list in set(prefix_lists):
-        for rule in bgp.prefix_list_rule.filter(prefix_list_id=prefix_list.id):
-            if rule.prefix:
-                prefix = rule.prefix.prefix.split("/")
-            elif rule.prefix_custom:
-                prefix = rule.prefix_custom.split("/")
-
-            output += f"ip ip-prefix { prefix_list.name } index { rule.index } { rule.action } { prefix[0] } { prefix[1] }"
-
-            if rule.ge:
-                output += " greater-equal " + str(rule.ge)
-            if rule.le:
-                output += " less-equal " + str(rule.le)
-
-            output += "\n"
-
-    return output + "\n"
-
-def configure_route_policies(host, bgp) -> str:
-    output: str = ""
-
-    for bgp_session in bgp.session.filter(device=host.name):
-        routing_policies = bgp_session.import_policies + bgp_session.export_policies
-        for routing_policy in routing_policies:
-            rules = bgp.routing_policy_rule.filter(routing_policy_id=routing_policy.id)
-            for rule in rules:
-                output += f"route-policy {routing_policy.name} {rule.action} node {rule.index}\n"
-
-                if rule.description:
-                    output += f"    description {rule.description}\n"
-
-                ## Match Clauses ------
-                for prefix_list in rule.match_ip_address:
-                    output += f"    if-match ip-prefix {prefix_list.name}\n"
-
-                for community in rule.match_community:
-                    community_filter = bgp.community.get(id=community.id).description
-                    output += f"    if-match community-filter {community_filter}\n"
-                
-                if rule.match_custom:
-                    for match_clause in rule.match_custom:
-                        if match_clause[0] == 'as-path-filter':
-                            output += f"    if-match as-path-filter {match_clause[1]}\n"
-
-                        elif match_clause[0] == 'acl':
-                            output += f"    if-match acl {match_clause[1]}\n"
-                        
-                        else:
-                            raise Exception(f"Custom Match Clause not supported: {match_clause[0]}")
-
-                ## Apply Clauses -------
-                if rule.set_actions:
-                    for action in rule.set_actions:
-                        if action[0] == 'community':
-                            output += "    apply community "
-                            for community in action[1]:
-                                output += f"{community} "
-                            output += "\n"
-                        
-                        elif action[0] == 'as-path prepend':
-                            output += "    apply as-path "
-                            for asn in action[1]:
-                                output += f"{asn} "
-                            output += "additive\n"
-
-                        elif action[0] == 'next-hop':
-                            output += f"    apply ip-address next-hop {action[1]}\n"
-                
-                        else:
-                            raise Exception(f"Custom Apply Clause not supported: {action[0]}")
-                    # ------ TODO: CUSTOM APPLIES > ? ------ #
-                
-                if rule.custom_fields["local_preference"]:
-                    output += f'    apply local-preference {rule.custom_fields["local_preference"]}\n'
-
-            output += "\n"  
-    return output
-
-def configure_communities(host, bgp) -> str:
-    output: str = ""
-
-    for bgp_session in bgp.session.filter(device=host.name):
-        routing_policies = bgp_session.import_policies + bgp_session.export_policies
-        for routing_policy in routing_policies:
-            rules = bgp.routing_policy_rule.filter(routing_policy_id=routing_policy.id)
-            for rule in rules:
-                for community in rule.match_community:
-                    community_filter = bgp.community.get(id=community.id)
-                    output += f"ip community-filter basic {community_filter.description} index 10 permit {community_filter.value}\n"
-
-    output += "\n"
-    return output
-
-def configure_bgp_groups(host, bgp) -> str:
-    output: str = ""
-    peer_groups = [bgp_session.peer_group for bgp_session in bgp.session.filter(device=host.name) if bgp_session.peer_group is not None]
-
-    for group in peer_groups:
-        peer_group = bgp.peer_group.get(id=group.id)
-        print(peer_group)
-
-        if peer_group.custom_fields["bgp_session_type"] == "External":
-            output += f"    peer {peer_group.name} external\n"
-            output += f"    peer {peer_group.name} as-number {peer_group.custom_fields['ASN']}"
-    return output
-
-def main():
-    logger = logging.getLogger("logger")
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-
-    netbox = pynetbox.api(
-        url=NETBOX_URL,
-        token=NETBOX_TOKEN
-    )
-
-    for host in netbox.dcim.devices.all():
-        output_config: str = ""
-
-        if host.primary_ip and host.platform:
-            if host.platform.name == "Huawei VRP":
-                print(f"Generating configuration script for {host.name}...\n\n")
-                # output_config += HUAWEI_INITIAL_DEFAULT_CONFIG
-
-                output_config += configure_bgp(host, netbox)
-        else:
-            raise Exception(f"Device {host.name} has no Primary IP and no Platform")
+            device_rp_rules.extend([rp_rule for rp_rule in netbox.rp_rules 
+                                             if rp_rule.routing_policy["id"] in routing_policies])
             
-    print(output_config)
-
+        
 if __name__ == "__main__":
     main()
