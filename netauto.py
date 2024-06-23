@@ -1,10 +1,6 @@
-import pynetbox, logging
+import pynetbox, logging, dotenv
 from pynetbox.core.response import RecordSet, Record
 from pynetbox.core.app import App
-
-NETBOX_URL: str = "https://netbox.iribarrem.com"
-NETBOX_TOKEN: str = "b186b056aae496bb4b2f1b8240964dad6f941265"
-#NETBOX_TOKEN: str = "e6c1791b139de6e247a1a75a865f605949a18cb6"
 
 class Netbox():
     def __init__(self, url, token) -> None:
